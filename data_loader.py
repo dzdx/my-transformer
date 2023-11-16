@@ -18,6 +18,8 @@ from torchtext.vocab import build_vocab_from_iterator
 
 from example1 import SimpleLossCompute
 from helper import DummyOptimizer, DummyScheduler
+import torch.multiprocessing as mp
+
 from train import LabelSmoothing, rate, TrainState, run_epoch, Batch
 from tranformer import make_model
 
@@ -306,3 +308,52 @@ def train_worker(
     if is_main_process:
         file_path = "%sfinal.pt" % config["file_prefix"]
         torch.save(module.state_dict(), file_path)
+
+
+def train_distributed_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
+    ngpus = torch.cuda.device_count()
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12356"
+    print(f"Number of GPUs detected: {ngpus}")
+    print("Spawning training processes ...")
+    mp.spawn(
+        train_worker,
+        nprocs=ngpus,
+        args=(ngpus, vocab_src, vocab_tgt, spacy_de, spacy_en, config, True),
+    )
+
+
+def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
+    if config["distributed"]:
+        train_distributed_model(
+            vocab_src, vocab_tgt, spacy_de, spacy_en, config
+        )
+    else:
+        train_worker(
+            0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False
+        )
+
+
+def load_trained_model():
+    config = {
+        "batch_size": 32,
+        "distributed": False,
+        "num_epochs": 8,
+        "accum_iter": 10,
+        "base_lr": 1.0,
+        "max_padding": 72,
+        "warmup": 3000,
+        "file_prefix": "multi30k_model_",
+    }
+    spacy_de, spacy_en = load_tokenizers()
+    vocab_src, vocab_tgt = load_vocab(spacy_de, spacy_en)
+    model_path = "multi30k_model_final.pt"
+    if not exists(model_path):
+        train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config)
+
+    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+    model.load_state_dict(torch.load("multi30k_model_final.pt"))
+    return model
+
+
+model = load_trained_model()
